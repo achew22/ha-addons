@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Mirror the newest posts of public Facebook pages into Home Assistant sensors
-and Atom feeds.
+"""Read the newest post of each configured public Facebook page into a Home
+Assistant sensor. Runs once and exits; the app's cron runs it on a schedule.
 
 Facebook sends logged-out requests from datacenter IPs to its login page, so
 this is meant to run at home. Without a token it uses the same extraction as
@@ -13,12 +13,9 @@ Standard library only.
 
 import datetime as dt
 import html
-import http.server
 import json
 import os
 import re
-import sys
-import threading
 import time
 import urllib.error
 import urllib.parse
@@ -27,7 +24,6 @@ from zoneinfo import ZoneInfo
 
 OPTIONS_FILE = os.environ.get("OPTIONS_FILE", "/data/options.json")
 TZ = ZoneInfo(os.environ.get("TZ") or "UTC")
-PORT = int(os.environ.get("PORT", "8884"))
 GRAPH_VERSION = os.environ.get("GRAPH_VERSION", "v23.0")
 
 HEADERS = {
@@ -45,9 +41,6 @@ HEADERS = {
     "Sec-Fetch-User": "?1",
     "Upgrade-Insecure-Requests": "1",
 }
-
-states = {}
-lock = threading.Lock()
 
 
 class Blocked(Exception):
@@ -68,7 +61,7 @@ def slugify(page):
 
 
 def load_options():
-    """Pages to read and the poll interval, from the add-on options or the env."""
+    """Pages to read, from the add-on options or the env."""
     opts = {}
     try:
         with open(OPTIONS_FILE) as f:
@@ -91,8 +84,7 @@ def load_options():
             "token": (p.get("token") or "").strip(),
             "sensor": f"sensor.fb_{slugify(p.get('sensor') or name)}",
         })
-    minutes = int(opts.get("poll_minutes") or os.environ.get("POLL_MINUTES") or 30)
-    return pages, max(minutes, 5)
+    return pages
 
 
 def fetch_page(page):
@@ -209,33 +201,49 @@ def enrich(post):
     return post
 
 
-def push_to_ha(cfg, entry):
-    token = os.environ.get("SUPERVISOR_TOKEN")
-    if not token:
+def ha_request(method, path, body=None):
+    req = urllib.request.Request(
+        f"http://supervisor/core/api/{path}",
+        data=json.dumps(body).encode() if body is not None else None,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {os.environ['SUPERVISOR_TOKEN']}",
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.load(resp)
+
+
+def push_to_ha(cfg, post, status, error):
+    """Write the sensor. On a failed check, keep the last good post's attributes
+    and only update status, error and checked."""
+    if not os.environ.get("SUPERVISOR_TOKEN"):
         return
-    post = entry.get("post")
-    attrs = {
+    path = f"states/{cfg['sensor']}"
+    attrs, state = {}, status
+    if post is None:
+        try:
+            old = ha_request("GET", path)
+            attrs, state = old.get("attributes") or {}, old.get("state") or status
+        except Exception:
+            pass
+    else:
+        attrs = {k: post.get(k) for k in
+                 ("text", "url", "published", "is_today", "age_hours", "images", "id", "source")}
+        text = post.get("text", "").strip()
+        state = text.splitlines()[0][:250] if text else "(no text)"
+    attrs.update({
         "friendly_name": f"Facebook {cfg['page']}",
         "icon": "mdi:facebook",
         "page": cfg["page"],
-        "status": entry["status"],
-        "error": entry["error"],
-        "checked": entry["checked"],
-    }
-    if post:
-        attrs.update({k: post.get(k) for k in
-                      ("text", "url", "published", "is_today", "age_hours", "images", "id", "source")})
-    text = (post or {}).get("text", "").strip()
-    state = text.splitlines()[0][:250] if text else entry["status"]
-    req = urllib.request.Request(
-        f"http://supervisor/core/api/states/{cfg['sensor']}",
-        data=json.dumps({"state": state, "attributes": attrs}).encode(),
-        method="POST",
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-    )
+        "status": status,
+        "error": error,
+        "checked": dt.datetime.now(TZ).isoformat(),
+    })
     try:
-        urllib.request.urlopen(req, timeout=10).read()
-    except Exception as e:  # keep serving the feed even if HA is restarting
+        ha_request("POST", path, {"state": state, "attributes": attrs})
+    except Exception as e:
         log(f"{cfg['page']}: could not update {cfg['sensor']}: {e}")
 
 
@@ -257,97 +265,18 @@ def check_page(cfg):
     except Exception as e:
         post, status, error = None, "error", f"{type(e).__name__}: {e}"
         log(f"{page}: error: {error}")
-    with lock:
-        entry = states.setdefault(page, {"post": None})
-        entry.update(status=status, error=error, checked=dt.datetime.now(TZ).isoformat())
-        if post:
-            entry["post"] = post
-        entry = dict(entry)
-    push_to_ha(cfg, entry)
-
-
-def poll_forever(pages, minutes):
-    while True:
-        for i, cfg in enumerate(pages):
-            if i:
-                time.sleep(20)  # don't hit Facebook with a burst
-            check_page(cfg)
-        time.sleep(minutes * 60)
-
-
-def esc(s):
-    return html.escape(s or "", quote=True)
-
-
-def atom(page):
-    with lock:
-        entry = dict(states.get(page) or {})
-    post = entry.get("post")
-    updated = (post or {}).get("published") or entry.get("checked") or dt.datetime.now(TZ).isoformat()
-    out = [
-        '<?xml version="1.0" encoding="UTF-8"?>',
-        '<feed xmlns="http://www.w3.org/2005/Atom">',
-        f"<title>{esc(page)} (fb-reader)</title>",
-        f'<link rel="alternate" href="https://www.facebook.com/{esc(page)}/"/>',
-        f"<id>urn:fb-reader:{esc(page)}</id>",
-        f"<updated>{esc(updated)}</updated>",
-    ]
-    if post:
-        text = post["text"].strip()
-        title = text.splitlines()[0][:100] if text else "Post"
-        content = "<p>" + esc(post["text"]).replace("\n", "<br/>") + "</p>"
-        content += "".join(f'<p><img src="{esc(u)}"/></p>' for u in post["images"])
-        out += [
-            "<entry>",
-            f"<title>{esc(title)}</title>",
-            f'<link href="{esc(post["url"])}"/>',
-            f"<id>urn:fbpost:{esc(post['id'])}</id>",
-            f"<published>{esc(post['published'])}</published>",
-            f"<updated>{esc(post['published'])}</updated>",
-            f'<content type="html">{esc(content)}</content>',
-            "</entry>",
-        ]
-    out.append("</feed>")
-    return "\n".join(out)
-
-
-class Handler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        path = urllib.parse.urlparse(self.path).path.strip("/")
-        if path.startswith("feed/") and path[5:] in states:
-            body, ctype = atom(path[5:]).encode(), "application/atom+xml; charset=utf-8"
-        elif path == "status":
-            with lock:
-                body = json.dumps(states, indent=2).encode()
-            ctype = "application/json"
-        else:
-            self.send_error(404)
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *args):
-        pass
+    push_to_ha(cfg, post, status, error)
 
 
 def main():
-    pages, minutes = load_options()
+    """One pass over every page; cron runs this on the configured schedule."""
+    pages = load_options()
     if not pages:
         log("no pages configured; add some under the app's Configuration tab")
-    for cfg in pages:
-        states[cfg["page"]] = {"post": None, "status": "starting", "error": None, "checked": None}
-    if "--once" in sys.argv:
-        for cfg in pages:
-            check_page(cfg)
-        print(json.dumps(states, indent=2))
-        return
-    log(f"reading {', '.join(c['page'] for c in pages) or 'nothing'} every {minutes} min; "
-        f"serving /feed/<page> and /status on :{PORT}")
-    threading.Thread(target=poll_forever, args=(pages, minutes), daemon=True).start()
-    http.server.ThreadingHTTPServer(("", PORT), Handler).serve_forever()
+    for i, cfg in enumerate(pages):
+        if i:
+            time.sleep(20)  # don't hit Facebook with a burst
+        check_page(cfg)
 
 
 if __name__ == "__main__":

@@ -34,24 +34,35 @@ class ExtractTest(unittest.TestCase):
         with self.assertRaises(fb_reader.Blocked):
             fb_reader.extract_posts(page([], og=False), "x")
 
-    def test_atom_is_valid_xml(self):
-        p = fb_reader.enrich(fb_reader.extract_posts(page([node("9", "Tues & <stuff>", int(time.time()))]), "x")[0])
-        fb_reader.states["x"] = {"post": p, "checked": None}
-        import xml.dom.minidom
-        xml.dom.minidom.parseString(fb_reader.atom("x"))
+
+class PushTest(unittest.TestCase):
+    def test_failure_keeps_last_post(self):
+        calls = []
+        def fake(method, path, body=None):
+            calls.append((method, path, body))
+            if method == "GET":
+                return {"state": "Hyrox", "attributes": {"text": "Hyrox\nrun", "status": "ok"}}
+            return {}
+        fb_reader.ha_request = fake
+        os.environ["SUPERVISOR_TOKEN"] = "x"
+        cfg = {"page": "p", "sensor": "sensor.fb_p", "token": ""}
+        fb_reader.push_to_ha(cfg, None, "blocked", "login wall")
+        body = calls[-1][2]
+        self.assertEqual(body["state"], "Hyrox")
+        self.assertEqual(body["attributes"]["text"], "Hyrox\nrun")
+        self.assertEqual(body["attributes"]["status"], "blocked")
 
 
 class OptionsTest(unittest.TestCase):
     def test_pages(self):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-            json.dump({"poll_minutes": 1, "pages": [
+            json.dump({"pages": [
                 {"page": "https://www.facebook.com/1884FunctionalFitness/"},
                 {"page": "NASA", "token": " t ", "sensor": "space"},
                 {"page": ""}]}, f)
         fb_reader.OPTIONS_FILE = f.name
-        pages, minutes = fb_reader.load_options()
+        pages = fb_reader.load_options()
         os.unlink(f.name)
-        self.assertEqual(minutes, 5)
         self.assertEqual([p["page"] for p in pages], ["1884FunctionalFitness", "NASA"])
         self.assertEqual(pages[0]["sensor"], "sensor.fb_1884functionalfitness")
         self.assertEqual(pages[1]["sensor"], "sensor.fb_space")

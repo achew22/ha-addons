@@ -1,23 +1,19 @@
 name: fb-reader
-version: "0.1.1"
+version: "0.2.0"
 slug: fb_reader
-description: Reads the newest post from public Facebook pages into sensors and Atom feeds
+description: Reads the newest post from public Facebook pages into sensors
 url: https://github.com/achew22/ha-addons/tree/main/fb_reader
 arch: [aarch64, amd64]
 init: false
 startup: application
 boot: auto
 homeassistant_api: true
-ports:
-  8884/tcp: null
-ports_description:
-  8884/tcp: Atom feeds (/feed/<page>) and status (/status); not exposed unless you set a host port
 options:
-  poll_minutes: 30
+  schedule: "*/30 * * * *"
   pages:
     - page: 1884FunctionalFitness
 schema:
-  poll_minutes: int(5,1440)
+  schedule: match(^[0-9*/,-]+( [0-9*/,-]+){4}$)
   pages:
     - page: str
       token: password?
