@@ -1,5 +1,5 @@
 name: fb-reader
-version: "0.2.0"
+version: "0.2.1"
 slug: fb_reader
 description: Reads the newest post from public Facebook pages into sensors
 url: https://github.com/achew22/ha-addons/tree/main/fb_reader

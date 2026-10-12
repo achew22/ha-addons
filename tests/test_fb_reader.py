@@ -36,21 +36,40 @@ class ExtractTest(unittest.TestCase):
 
 
 class PushTest(unittest.TestCase):
-    def test_failure_keeps_last_post(self):
-        calls = []
+    def setUp(self):
+        self.stored = {}
         def fake(method, path, body=None):
-            calls.append((method, path, body))
             if method == "GET":
-                return {"state": "Hyrox", "attributes": {"text": "Hyrox\nrun", "status": "ok"}}
+                if not self.stored:
+                    raise OSError("404")
+                return self.stored
+            self.stored = body
             return {}
         fb_reader.ha_request = fake
         os.environ["SUPERVISOR_TOKEN"] = "x"
-        cfg = {"page": "p", "sensor": "sensor.fb_p", "token": ""}
-        fb_reader.push_to_ha(cfg, None, "blocked", "login wall")
-        body = calls[-1][2]
-        self.assertEqual(body["state"], "Hyrox")
-        self.assertEqual(body["attributes"]["text"], "Hyrox\nrun")
-        self.assertEqual(body["attributes"]["status"], "blocked")
+        self.cfg = {"page": "p", "sensor": "sensor.fb_p", "token": ""}
+
+    def post(self, pid, text, ago):
+        return fb_reader.enrich({"id": pid, "text": text, "url": "u", "images": [],
+                                 "created": int(time.time()) - ago, "source": "page"})
+
+    def test_older_post_does_not_replace_newer(self):
+        fb_reader.push_to_ha(self.cfg, [self.post("2", "Hyrox\nrun", 60)], "ok", None)
+        fb_reader.push_to_ha(self.cfg, [self.post("1", "Monday WOD", 300)], "ok", None)
+        self.assertEqual(self.stored["state"], "Hyrox")
+        self.assertEqual([p["id"] for p in self.stored["attributes"]["recent"]], ["2", "1"])
+
+    def test_failure_keeps_last_post(self):
+        fb_reader.push_to_ha(self.cfg, [self.post("2", "Hyrox\nrun", 60)], "ok", None)
+        fb_reader.push_to_ha(self.cfg, [], "blocked", "login wall")
+        self.assertEqual(self.stored["state"], "Hyrox")
+        self.assertEqual(self.stored["attributes"]["text"], "Hyrox\nrun")
+        self.assertEqual(self.stored["attributes"]["status"], "blocked")
+
+    def test_keeps_five(self):
+        for i in range(8):
+            fb_reader.push_to_ha(self.cfg, [self.post(str(i), f"p{i}", 1000 - i)], "ok", None)
+        self.assertEqual([p["id"] for p in self.stored["attributes"]["recent"]], ["7", "6", "5", "4", "3"])
 
 
 class OptionsTest(unittest.TestCase):

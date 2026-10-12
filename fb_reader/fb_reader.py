@@ -215,25 +215,48 @@ def ha_request(method, path, body=None):
         return json.load(resp)
 
 
-def push_to_ha(cfg, post, status, error):
-    """Write the sensor. On a failed check, keep the last good post's attributes
-    and only update status, error and checked."""
+POST_KEYS = ("text", "url", "published", "is_today", "age_hours", "images", "id", "source")
+KEEP_RECENT = 5
+
+
+def merge_recent(old_recent, new_posts):
+    """Facebook embeds one post per page load and not always the newest, so
+    keep the last few seen, newest first, and report the newest."""
+    by_id = {p["id"]: p for p in old_recent or [] if isinstance(p, dict) and p.get("id")}
+    for p in new_posts:
+        by_id[p["id"]] = {k: p.get(k) for k in POST_KEYS}
+    recent = sorted(by_id.values(), key=lambda p: p.get("published") or "", reverse=True)
+    for p in recent:
+        if p.get("published"):
+            enrich_published(p)
+    return recent[:KEEP_RECENT]
+
+
+def enrich_published(p):
+    """Refresh is_today and age_hours of a stored post."""
+    published = dt.datetime.fromisoformat(p["published"])
+    p["is_today"] = published.astimezone(TZ).date() == dt.datetime.now(TZ).date()
+    p["age_hours"] = round((time.time() - published.timestamp()) / 3600, 1)
+
+
+def push_to_ha(cfg, posts, status, error):
+    """Write the sensor. A failed check keeps the stored posts and only updates
+    status, error and checked."""
     if not os.environ.get("SUPERVISOR_TOKEN"):
         return
     path = f"states/{cfg['sensor']}"
-    attrs, state = {}, status
-    if post is None:
-        try:
-            old = ha_request("GET", path)
-            attrs, state = old.get("attributes") or {}, old.get("state") or status
-        except Exception:
-            pass
-    else:
-        attrs = {k: post.get(k) for k in
-                 ("text", "url", "published", "is_today", "age_hours", "images", "id", "source")}
-        text = post.get("text", "").strip()
-        state = text.splitlines()[0][:250] if text else "(no text)"
+    old_attrs = {}
+    try:
+        old_attrs = ha_request("GET", path).get("attributes") or {}
+    except Exception:
+        pass  # sensor doesn't exist yet, or HA is restarting
+    recent = merge_recent(old_attrs.get("recent"), posts)
+    newest = recent[0] if recent else {}
+    attrs = {k: newest.get(k) for k in POST_KEYS}
+    text = (newest.get("text") or "").strip()
+    state = text.splitlines()[0][:250] if text else status
     attrs.update({
+        "recent": recent,
         "friendly_name": f"Facebook {cfg['page']}",
         "icon": "mdi:facebook",
         "page": cfg["page"],
@@ -254,18 +277,17 @@ def check_page(cfg):
             posts, source = fetch_graph(page, cfg["token"]), "graph"
         else:
             posts, source = extract_posts(fetch_page(page), page), "page"
-        posts.sort(key=lambda p: p["created"] or 0, reverse=True)
-        post = enrich(posts[0])
-        post["source"] = source
+        for p in posts:
+            enrich(p)["source"] = source
         status, error = "ok", None
-        log(f"{page}: ok via {source}, post {post['id']} from {post['published']}")
+        log(f"{page}: ok via {source}, posts " + ", ".join(f"{p['id']} from {p['published']}" for p in posts))
     except Blocked as e:
-        post, status, error = None, "blocked", str(e)
+        posts, status, error = [], "blocked", str(e)
         log(f"{page}: blocked: {e}")
     except Exception as e:
-        post, status, error = None, "error", f"{type(e).__name__}: {e}"
+        posts, status, error = [], "error", f"{type(e).__name__}: {e}"
         log(f"{page}: error: {error}")
-    push_to_ha(cfg, post, status, error)
+    push_to_ha(cfg, posts, status, error)
 
 
 def main():

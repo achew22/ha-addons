@@ -4,8 +4,10 @@ Reads the newest post from each Facebook page in `pages` into a sensor per page,
 `sensor.fb_<page>` (lowercased, non-alphanumerics become `_`), or `sensor.fb_<sensor>` if
 you set `sensor`. State is the post's first line. Attributes: `text`, `url`, `published`,
 `is_today`, `age_hours`, `images`, `id`, `source` (`page` or `graph`), plus `status`
-(`ok`, `blocked`, `error`), `error` and `checked`. A failed check keeps the last good post
-and only updates `status`, `error` and `checked`.
+(`ok`, `blocked`, `error`), `error` and `checked`. `recent` lists the last five posts
+seen, newest first. Facebook embeds one post per page load and not always the newest,
+so the sensor reports the newest post it has seen, not the one from the latest pass.
+A failed check keeps the stored posts and only updates `status`, `error` and `checked`.
 
 The app listens on no port. It runs one pass at start, then cron runs a pass on `schedule`.
 
