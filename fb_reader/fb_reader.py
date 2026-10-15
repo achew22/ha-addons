@@ -83,6 +83,7 @@ def load_options():
             "page": name,
             "token": (p.get("token") or "").strip(),
             "sensor": f"sensor.fb_{slugify(p.get('sensor') or name)}",
+            "skip_today": opts.get("skip_when_fetched_today", True),
         })
     return pages
 
@@ -239,17 +240,31 @@ def enrich_published(p):
     p["age_hours"] = round((time.time() - published.timestamp()) / 3600, 1)
 
 
-def push_to_ha(cfg, posts, status, error):
+def stored_attrs(cfg):
+    """The sensor's current attributes, or {} if it doesn't exist yet."""
+    if not os.environ.get("SUPERVISOR_TOKEN"):
+        return {}
+    try:
+        return ha_request("GET", f"states/{cfg['sensor']}").get("attributes") or {}
+    except Exception:
+        return {}  # sensor doesn't exist yet, or HA is restarting
+
+
+def has_todays_post(attrs):
+    """True if the sensor's newest post was published today, local time."""
+    try:
+        published = dt.datetime.fromisoformat(attrs["published"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return published.astimezone(TZ).date() == dt.datetime.now(TZ).date()
+
+
+def push_to_ha(cfg, posts, status, error, old_attrs):
     """Write the sensor. A failed check keeps the stored posts and only updates
     status, error and checked."""
     if not os.environ.get("SUPERVISOR_TOKEN"):
         return
     path = f"states/{cfg['sensor']}"
-    old_attrs = {}
-    try:
-        old_attrs = ha_request("GET", path).get("attributes") or {}
-    except Exception:
-        pass  # sensor doesn't exist yet, or HA is restarting
     recent = merge_recent(old_attrs.get("recent"), posts)
     newest = recent[0] if recent else {}
     attrs = {k: newest.get(k) for k in POST_KEYS}
@@ -271,7 +286,12 @@ def push_to_ha(cfg, posts, status, error):
 
 
 def check_page(cfg):
+    """Fetch one page and update its sensor. Returns False if it was skipped
+    because the sensor already holds a post from today."""
     page = cfg["page"]
+    old_attrs = stored_attrs(cfg)
+    if cfg.get("skip_today", True) and has_todays_post(old_attrs):
+        return False
     try:
         if cfg["token"]:
             posts, source = fetch_graph(page, cfg["token"]), "graph"
@@ -287,7 +307,8 @@ def check_page(cfg):
     except Exception as e:
         posts, status, error = [], "error", f"{type(e).__name__}: {e}"
         log(f"{page}: error: {error}")
-    push_to_ha(cfg, posts, status, error)
+    push_to_ha(cfg, posts, status, error, old_attrs)
+    return True
 
 
 def main():
@@ -295,10 +316,11 @@ def main():
     pages = load_options()
     if not pages:
         log("no pages configured; add some under the app's Configuration tab")
-    for i, cfg in enumerate(pages):
-        if i:
+    fetched = False
+    for cfg in pages:
+        if fetched:
             time.sleep(20)  # don't hit Facebook with a burst
-        check_page(cfg)
+        fetched = check_page(cfg)
 
 
 if __name__ == "__main__":

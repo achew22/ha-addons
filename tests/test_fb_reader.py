@@ -49,26 +49,57 @@ class PushTest(unittest.TestCase):
         os.environ["SUPERVISOR_TOKEN"] = "x"
         self.cfg = {"page": "p", "sensor": "sensor.fb_p", "token": ""}
 
+    def push(self, posts, status, error):
+        fb_reader.push_to_ha(self.cfg, posts, status, error, fb_reader.stored_attrs(self.cfg))
+
+    def test_skips_when_today_is_stored(self):
+        self.push([self.post("2", "Hyrox", 60)], "ok", None)
+        fetched = []
+        fb_reader.fetch_page = lambda page: fetched.append(page)
+        self.assertFalse(fb_reader.check_page(self.cfg))
+        self.assertEqual(fetched, [])
+
+    def test_fetches_when_stored_post_is_old(self):
+        self.push([self.post("1", "old", 86400 * 2)], "ok", None)
+        fetched = []
+        def fake_fetch(page):
+            fetched.append(page)
+            raise fb_reader.Blocked("login wall")
+        fb_reader.fetch_page = fake_fetch
+        self.assertTrue(fb_reader.check_page(self.cfg))
+        self.assertEqual(fetched, ["p"])
+        self.assertEqual(self.stored["attributes"]["status"], "blocked")
+
+    def test_skip_can_be_turned_off(self):
+        self.push([self.post("2", "Hyrox", 60)], "ok", None)
+        fetched = []
+        def fake_fetch(page):
+            fetched.append(page)
+            raise fb_reader.Blocked("x")
+        fb_reader.fetch_page = fake_fetch
+        self.assertTrue(fb_reader.check_page(dict(self.cfg, skip_today=False)))
+        self.assertEqual(fetched, ["p"])
+
     def post(self, pid, text, ago):
         return fb_reader.enrich({"id": pid, "text": text, "url": "u", "images": [],
                                  "created": int(time.time()) - ago, "source": "page"})
 
     def test_older_post_does_not_replace_newer(self):
-        fb_reader.push_to_ha(self.cfg, [self.post("2", "Hyrox\nrun", 60)], "ok", None)
-        fb_reader.push_to_ha(self.cfg, [self.post("1", "Monday WOD", 300)], "ok", None)
+        self.push([self.post("2", "Hyrox\nrun", 60)], "ok", None)
+        self.push([self.post("1", "Monday WOD", 300)], "ok", None)
         self.assertEqual(self.stored["state"], "Hyrox")
         self.assertEqual([p["id"] for p in self.stored["attributes"]["recent"]], ["2", "1"])
 
     def test_failure_keeps_last_post(self):
-        fb_reader.push_to_ha(self.cfg, [self.post("2", "Hyrox\nrun", 60)], "ok", None)
-        fb_reader.push_to_ha(self.cfg, [], "blocked", "login wall")
+        self.push([self.post("2", "Hyrox\nrun", 60)], "ok", None)
+        self.push([], "blocked", "login wall")
         self.assertEqual(self.stored["state"], "Hyrox")
         self.assertEqual(self.stored["attributes"]["text"], "Hyrox\nrun")
         self.assertEqual(self.stored["attributes"]["status"], "blocked")
 
     def test_keeps_five(self):
         for i in range(8):
-            fb_reader.push_to_ha(self.cfg, [self.post(str(i), f"p{i}", 1000 - i)], "ok", None)
+            self.push([self.post(str(i), f"p{i}", 1000 - i)], "ok", None)
         self.assertEqual([p["id"] for p in self.stored["attributes"]["recent"]], ["7", "6", "5", "4", "3"])
 
 

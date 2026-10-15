@@ -14,7 +14,10 @@ The app listens on no port. It runs one pass at start, then cron runs a pass on 
 ## Options
 
 - `schedule`: five-field cron expression in Home Assistant's time zone (default
-  `*/30 * * * *`). Pages in one pass are spaced 20 seconds apart.
+  `*/15 * * * *`). Pages fetched in one pass are spaced 20 seconds apart.
+- `skip_when_fetched_today`: when on (the default), a pass leaves a page alone if its
+  sensor's newest post was published today, so a frequent schedule only hits Facebook
+  until the day's post is in.
 - `pages`: list of pages. Each has `page` (the name in the facebook.com URL, or the full
   URL) and optionally `token` and `sensor`.
 

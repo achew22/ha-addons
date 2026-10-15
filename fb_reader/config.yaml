@@ -1,5 +1,5 @@
 name: fb-reader
-version: "0.2.1"
+version: "0.3.0"
 slug: fb_reader
 description: Reads the newest post from public Facebook pages into sensors
 url: https://github.com/achew22/ha-addons/tree/main/fb_reader
@@ -9,11 +9,13 @@ startup: application
 boot: auto
 homeassistant_api: true
 options:
-  schedule: "*/30 * * * *"
+  schedule: "*/15 * * * *"
+  skip_when_fetched_today: true
   pages:
     - page: 1884FunctionalFitness
 schema:
   schedule: match(^[0-9*/,-]+( [0-9*/,-]+){4}$)
+  skip_when_fetched_today: bool
   pages:
     - page: str
       token: password?
